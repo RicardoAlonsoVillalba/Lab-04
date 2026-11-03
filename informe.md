@@ -455,3 +455,43 @@ A continuación se presenta la línea base de seguridad estructurada para entorn
 *   **Actualización:** Definir una ventana de mantenimiento para aplicar parches de seguridad (versiones menores) de PostgreSQL regularmente[cite: 15].
 *   **Revisión periódica:** Realizar una auditoría semestral de las cuentas activas, revisión de los roles asignados y análisis de logs buscando anomalías[cite: 15].
 *   **Documentación:** Mantener siempre actualizado el diseño de red, el archivo `pg_hba.conf` comentado, los procedimientos de respaldo/restauración y esta línea base[cite: 15].
+
+---
+
+# Cuestionario Final de Evaluación y Síntesis
+
+## 1. ¿Cuál era la principal superficie de ataque?
+La exposición del servicio hacia redes públicas o no restringidas debido al parámetro `listen_addresses = '*'` combinado con reglas permisivas en `pg_hba.conf` (`0.0.0.0/0`). Esto permitía que cualquier equipo de la red pudiera alcanzar el puerto del motor de base de datos e intentar realizar ataques de denegación de servicio o fuerza bruta.
+
+## 2. ¿Qué configuración representaba el mayor riesgo?
+El uso de cuentas con privilegios de `SUPERUSER` por parte de las aplicaciones web y la permisión de conexiones sin cifrar. Si la aplicación web sufría una vulnerabilidad (como SQL Injection), un atacante obtenía control total sobre el clúster de base de datos e incluso la capacidad de interactuar con el sistema operativo subyacente.
+
+## 3. ¿Qué cambio produjo la mayor reducción de exposición?
+Restringir `listen_addresses` a la IP privada específica (o `localhost`) y configurar `pg_hba.conf` para aceptar únicamente conexiones desde direcciones IP/subredes autorizadas mediante protocolos cifrados (`hostssl`).
+
+## 4. ¿Qué diferencia existe entre firewall y pg_hba.conf?
+* **Firewall (Capa 3/4 - Red):** Filtra los paquetes de red a nivel de sistema operativo antes de que toquen el proceso de PostgreSQL, previniendo escaneos y ataques de agotamiento de recursos (DoS).
+* **`pg_hba.conf` (Capa 7 - Aplicación):** Controla el acceso a nivel de aplicación una vez que la conexión TCP ya fue establecida, validando la dirección IP de origen, la base de datos destino, el usuario y el método de autenticación solicitado.
+
+## 5. ¿Qué diferencia existe entre autenticación y autorización?
+* **Autenticación:** Es el proceso de **verificar la identidad** del usuario o cliente que intenta conectarse (por ejemplo, validar si la contraseña encriptada con `scram-sha-256` es correcta).
+* **Autorización:** Es el proceso de **determinar qué permisos tiene** una identidad previamente autenticada dentro de la base de datos (por ejemplo, si tiene privilegios para ejecutar `SELECT`, `INSERT` o `DELETE` sobre una tabla).
+
+## 6. ¿Por qué una cuenta de aplicación no debe ser SUPERUSER?
+Porque viola el Principio de Mínimo Privilegio. Un rol `SUPERUSER` ignora todas las verificaciones de permisos dentro de la base de datos, pudiendo crear/eliminar tablas, alterar otros usuarios y ejecutar comandos del sistema operativo mediante funciones de copia de archivos, aumentando catastróficamente el impacto de un fallo de seguridad en la aplicación.
+
+## 7. ¿Por qué cambiar el puerto de PostgreSQL no constituye hardening suficiente?
+Porque cambiar el puerto por defecto (`5432`) es únicamente "seguridad por oscuridad". Un atacante o herramienta automatizada de escaneo de red (como Nmap) puede identificar fácilmente que el servicio expuesto en el puerto alternativo corresponde a PostgreSQL mediante el análisis de firma del protocolo TCP.
+
+## 8. ¿Por qué listen_addresses='*' puede ser innecesario?
+Porque fuerza al servicio de PostgreSQL a escuchar peticiones en todas las interfaces de red configuradas en el servidor (incluyendo interfaces públicas o de mantenimiento). Si la base de datos se comunica únicamente con una aplicación local o una interfaz privada específica, escuchar en `*` expone el servicio a redes innecesarias.
+
+## 9. ¿Qué papel tiene el sistema operativo en la seguridad de PostgreSQL?
+El sistema operativo es la base de la seguridad física e infraestructura (Defensa en Profundidad). Si los permisos de archivos en el SO son laxos, un usuario local no autorizado podría leer el directorio de datos (`$PGDATA`) o extraer configuraciones sensibles (`pg_hba.conf`), evadiendo completamente los controles de acceso lógicos (`GRANT`/`REVOKE`) del motor.
+
+## 10. ¿Qué controles deberían revisarse periódicamente?
+1. **Auditoría de Roles y Permisos:** Verificar usuarios activos, cuentas inactivas y revocación de permisos elevados.
+2. **Revisión de `pg_hba.conf`:** Confirmar que no existan subredes obsoletas o reglas permisivas agregadas temporalmente.
+3. **Análisis de Logs:** Inspeccionar intentos fallidos de autenticación y conexiones no autorizadas.
+4. **Permisos a Nivel de OS:** Validar que el directorio de datos mantenga los permisos restringidos (`0700`).
+5. **Parches de Seguridad:** Aplicar actualizaciones menores del motor PostgreSQL regularmente.

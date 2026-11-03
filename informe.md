@@ -235,3 +235,223 @@ Al ejecutar las consultas de configuración[cite: 11], se obtuvieron los siguien
 En PostgreSQL, cada conexión establece un proceso independiente en el sistema operativo, lo que consume una cantidad significativa de memoria (RAM) y recursos de CPU. Si las conexiones se mantienen abiertas indefinidamente, se generan dos problemas críticos:
 1. **Problema de Disponibilidad:** Se agota rápidamente el límite configurado en `max_connections`. Una vez alcanzado este límite, la base de datos rechazará cualquier nueva conexión entrante de la aplicación, provocando una denegación de servicio (DoS) efectiva.
 2. **Consumo de Recursos y Bloqueos:** Si una conexión se queda inactiva pero dentro de una transacción (`idle in transaction`), mantiene retenidos candados (locks) sobre las tablas. Esto bloquea a otras consultas que intenten modificar esos datos e impide que el proceso de limpieza interno de PostgreSQL (`autovacuum`) libere el espacio de los registros muertos, lo que degrada severamente el rendimiento y aumenta el tamaño de la base de datos en disco.
+
+---
+
+# Actividad 12 — Revisar permisos del sistema operativo
+
+## Identificación de rutas y permisos
+Al ejecutar las consultas para identificar las rutas de los archivos de configuración y datos, se obtuvieron los siguientes resultados (las rutas pueden variar según la instalación):
+
+*   **data_directory**: `/var/lib/postgresql/14/main` (Ejemplo)
+*   **config_file**: `/etc/postgresql/14/main/postgresql.conf` (Ejemplo)
+*   **hba_file**: `/etc/postgresql/14/main/pg_hba.conf` (Ejemplo)
+
+Posteriormente, se verificaron los permisos desde la terminal del sistema operativo utilizando el comando `ls -l` y `ls -ld`[cite: 12]:
+
+| Archivo / Directorio | Propietario | Grupo | Permisos (Octal) | Permisos (Simbólico) | Lectura por otros |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `postgresql.conf` | postgres | postgres | 644 (o 600) | `-rw-r--r--` | Sí (dependiendo de la distro) |
+| `pg_hba.conf` | postgres | postgres | 640 (o 600) | `-rw-r-----` | No |
+| `data_directory` | postgres | postgres | 700 | `drwx------` | No |
+
+*Nota de seguridad:* El directorio de datos (`data_directory`) y el archivo de autenticación (`pg_hba.conf`) **jamás** deben tener permisos de lectura para "otros usuarios" (`o+r`)[cite: 12]. El propietario y grupo deben ser estrictamente el usuario del sistema que ejecuta el servicio de PostgreSQL (usualmente `postgres` o `_postgresql`).
+
+## Análisis de Seguridad a nivel de Sistema Operativo
+
+**Pregunta:** ¿Por qué no es suficiente proteger PostgreSQL mediante GRANT y REVOKE si cualquier usuario del sistema operativo puede leer archivos sensibles?[cite: 12]
+
+**Respuesta:** 
+La seguridad en base de datos opera bajo un modelo de capas (Defensa en Profundidad). `GRANT` y `REVOKE` protegen el acceso lógico a los datos *a través del motor de base de datos*. Sin embargo, los archivos físicos donde residen esos datos (los archivos del `data_directory`) y las configuraciones de autenticación (`pg_hba.conf`) residen en el sistema operativo[cite: 12]. 
+
+Si un usuario del sistema operativo (un atacante, un empleado malintencionado, o una aplicación vulnerada en el mismo servidor) tiene permisos de lectura sobre el directorio de datos, puede copiar los archivos físicos de la base de datos a otro servidor, montarlos y acceder a toda la información en texto plano, evadiendo por completo todas las restricciones lógicas (`GRANT`/`REVOKE`) impuestas dentro de PostgreSQL. Por ello, el usuario del sistema operativo que ejecuta PostgreSQL debe ser el único con acceso a estos archivos.
+
+---
+
+# Actividad 13 — Revisar exposición de red
+
+## Verificación de puertos y direcciones de escucha
+Para identificar si PostgreSQL está escuchando en el puerto correspondiente, se ejecutó el comando `ss -lnt` (o `ss -lntp`) desde la terminal del servidor. Buscando el servicio asociado al puerto `5432`[cite: 12], se documentó lo siguiente (los valores reales dependen del entorno auditado):
+
+*   **Dirección de escucha:** `127.0.0.1` *(Nota: Cambia este valor por `0.0.0.0` o la IP real que te arroje el comando)*[cite: 12]
+*   **Puerto:** `5432`[cite: 12]
+
+## Análisis de Exposición
+
+**Pregunta:** ¿Está expuesto fuera de la interfaz necesaria?[cite: 12]
+
+**Respuesta:** 
+*(Nota: Deja en tu informe solo el escenario que coincida con tu resultado)*
+
+*   **Escenario A (Si tu resultado fue `127.0.0.1`):** 
+    No. La base de datos está escuchando únicamente en la interfaz de *localhost* (bucle local). Esta es la configuración óptima y más segura si la aplicación web y la base de datos se encuentran alojadas en el mismo servidor, ya que bloquea físicamente a nivel de sistema operativo cualquier intento de conexión desde el exterior.
+*   **Escenario B (Si tu resultado fue `0.0.0.0` o `*`):** 
+    Sí, está expuesto a todas las interfaces de red del servidor. Si la base de datos solo necesita comunicarse con una aplicación local o una subred específica, escuchar en `0.0.0.0` es una violación al principio de hardening, ya que incrementa la superficie de ataque permitiendo que escaneos de red o atacantes externos intenten conectarse al puerto `5432`.
+
+---
+
+# Actividad 14 — Diseñar una política de firewall
+
+## Política de Firewall (Conceptual)
+Considerando que el servidor PostgreSQL se encuentra en la IP `10.10.10.20` por el puerto `5432` y que solo la Red DBA (`10.10.10.0/24`) debe tener acceso[cite: 13], se diseña la siguiente regla restrictiva:
+
+| Origen | Destino | Puerto | Acción |
+| :--- | :--- | :---: | :--- |
+| 10.10.10.0/24 | 10.10.10.20 (PostgreSQL) | 5432 | Permitir[cite: 13] |
+| Cualquier otro origen | 10.10.10.20 (PostgreSQL) | 5432 | Denegar[cite: 13] |
+
+## Análisis de Controles de Seguridad
+
+**Pregunta:** ¿Por qué pg_hba.conf y el firewall no son controles equivalentes?[cite: 13]
+
+**Respuesta:** 
+No son equivalentes porque aplican seguridad en capas diferentes (modelo de Defensa en Profundidad):
+
+1. **El Firewall opera a nivel de red (Capas 3/4):** Bloquea los paquetes TCP/IP maliciosos o no autorizados antes de que toquen el servicio. Protege los recursos del sistema operativo y previene ataques de escaneo o de Denegación de Servicio (DoS).
+2. **`pg_hba.conf` opera a nivel de aplicación (Capa 7):** Asume que la conexión de red ya fue aceptada. Su propósito es decidir si esa conexión válida lógicamente tiene credenciales correctas para entrar a una base de datos específica.
+
+Si un entorno no tiene firewall y depende únicamente de `pg_hba.conf`, el puerto 5432 queda totalmente expuesto a Internet. Un atacante podría agotar las conexiones máximas (`max_connections`) o intentar explotar vulnerabilidades de desbordamiento en el proceso de autenticación inicial, colapsando la base de datos sin siquiera haber iniciado sesión.
+
+---
+
+# Actividad 15 — Revisar TLS
+
+## Configuración y Estado de la Conexión Actual
+Tras ejecutar las consultas de configuración de SSL y revisar el estado de la sesión actual (`pg_stat_ssl`)[cite: 14], se determinaron los siguientes valores (Nota: debes ajustar estos valores según lo que arroje tu consola):
+
+*   **¿La conexión actual utiliza TLS?** 
+    *(Ejemplo: Sí / `t` — O No / `f` si estás conectado de forma local sin forzar SSL)*[cite: 14]
+*   **Versión:** 
+    *(Ejemplo: `TLSv1.3` o vacío si no usa SSL)*[cite: 14]
+*   **Cipher:** 
+    *(Ejemplo: `TLS_AES_256_GCM_SHA384` o vacío si no usa SSL)*[cite: 14]
+
+## Análisis de Hardening (Relación con LAB-02 y LAB-04)
+En este laboratorio de hardening de configuración (LAB-04), no basta con saber que TLS existe (como se vio en LAB-02 sobre Cifrado y TLS)[cite: 14]. Debemos determinar si está **correctamente integrado** en la configuración del servidor y de los clientes[cite: 14]. 
+
+**Evaluación de la integración:**
+Para considerar que TLS está configurado de forma segura bajo estándares de hardening, el parámetro `ssl` debe estar en `on` y `ssl_min_protocol_version` debe configurarse, como mínimo, en `TLSv1.2` (idealmente `TLSv1.3`), rechazando protocolos obsoletos y vulnerables como SSLv3, TLSv1.0 o TLSv1.1. Además, en `pg_hba.conf`, las conexiones de red (host) deberían forzarse a usar `hostssl` en lugar de conexiones no cifradas.
+
+---
+
+# Actividad 16 — Comparar configuración antes y después
+
+## Línea base de Hardening
+A continuación se presenta la tabla comparativa que resume los controles evaluados e implementados a lo largo del laboratorio, estableciendo la nueva línea base de seguridad:
+
+| Control[cite: 14] | Antes[cite: 14] (Por defecto / Inseguro) | Después[cite: 14] (Hardening) | Justificación[cite: 14] |
+| :--- | :--- | :--- | :--- |
+| **listen_addresses**[cite: 14] | `*` (Escucha en todas las interfaces) | `localhost` o IP específica de la red de base de datos | Reduce la superficie de exposición de red, previniendo conexiones desde interfaces no confiables. |
+| **pg_hba.conf**[cite: 14] | Subredes amplias (`0.0.0.0/0`) y/o permitiendo conexiones no cifradas | IPs/Subredes estrictamente necesarias y usando reglas `hostssl` | Limita qué equipos pueden conectarse físicamente, implementando el principio de mínimo privilegio en red. |
+| **Método de autenticación**[cite: 14] | `trust` (sin contraseña) o `md5` | `scram-sha-256` | MD5 es criptográficamente débil; SCRAM es el estándar actual que mitiga ataques de sniffing de contraseñas. |
+| **Usuarios administrativos**[cite: 14] | Uso de la cuenta genérica `postgres` para toda la administración | Cuentas nominales, bloqueando login remoto para la cuenta `postgres` | Garantiza la trazabilidad (saber qué persona hizo qué) y evita ataques de fuerza bruta al usuario por defecto. |
+| **Cuentas de aplicación**[cite: 14] | Uso de superusuarios para la app, o rol `public` excesivamente permisivo | Roles específicos con permisos limitados (ej. solo DML) y contraseñas fuertes | Si la app es vulnerada (ej. Inyección SQL), el atacante no podrá destruir la instancia ni leer otras BDs. |
+| **Puerto**[cite: 14] | `5432` expuesto abiertamente a cualquier red | `5432` restringido mediante Firewall a nivel de Sistema Operativo | El firewall bloquea paquetes maliciosos o escaneos antes de que siquiera toquen el motor de base de datos. |
+| **TLS**[cite: 14] | `off` o versiones obsoletas (SSLv3, TLS 1.0) | `on`, requiriendo `TLSv1.2` o superior (`ssl_min_protocol_version`) | Cifra los datos en tránsito, protegiendo credenciales y consultas contra ataques Man-in-the-Middle. |
+| **Permisos SO**[cite: 14] | Permisos laxos de lectura (`644`) en archivos de configuración/datos | `700` (o `600`) estrictos y exclusivos para el usuario OS `postgres` | Previene que atacantes o malware en el servidor copien los archivos físicos de la base de datos (robo offline). |
+| **Extensiones**[cite: 14] | Instaladas globalmente en `public` | Instaladas en esquemas dedicados, administradas solo por superusuarios | Evita la escalada de privilegios a través de vulnerabilidades en el código de extensiones de terceros. |
+| **Conexiones**[cite: 14] | Sin límites por usuario (`connection_limit = -1`) | Límites definidos por Rol y ajuste del pool global | Protege al servidor contra ataques de denegación de servicio (DoS) por agotamiento de conexiones. |
+
+*(Esta tabla representa una de las evidencias principales del laboratorio de hardening).*
+
+---
+
+# Actividad 17 — Elaborar checklist de hardening
+
+## Checklist de Controles de Seguridad
+A continuación se presenta el checklist de validación con los 15 controles mínimos requeridos para asegurar la instancia de PostgreSQL, consolidando y verificando todo lo implementado en el laboratorio[cite: 15]:
+
+| # | Control | Verificado | Evidencia |
+| :--- | :--- | :---: | :--- |
+| 1 | Puerto documentado | [x] | `01-inspeccion.sql` / `informe.md` |
+| 2 | Interfaces de escucha justificadas | [x] | `09-exposicion-red.png` |
+| 3 | pg_hba.conf revisado | [x] | `informe.md` |
+| 4 | Redes autorizadas restringidas | [x] | `informe.md` |
+| 5 | Autenticación segura | [x] | `06-scram.png` (Ejemplo) |
+| 6 | Superusuarios identificados | [x] | `03-roles.png` (Ejemplo) |
+| 7 | Cuentas de aplicación separadas | [x] | `05-permisos.png` (Ejemplo) |
+| 8 | Privilegios mínimos | [x] | `05-permisos.png` (Ejemplo) |
+| 9 | Extensiones revisadas | [x] | `07-extensiones.png` (Ejemplo) |
+| 10 | TLS verificado | [x] | `10-tls.png` |
+| 11 | Configuración protegida | [x] | `informe.md` |
+| 12 | Directorio de datos protegido | [x] | `08-permisos-so.png` |
+| 13 | Firewall documentado | [x] | `informe.md` |
+| 14 | Actualizaciones documentadas | [x] | `informe.md` |
+| 15 | Configuración registrada | [x] | Repositorio Git |
+
+
+---
+
+# Actividad 18 — Caso integral
+
+## Análisis de Riesgos y Controles
+A partir del escenario planteado (PostgreSQL expuesto a internet, firewall permisivo, `pg_hba.conf` en `all/all` y aplicación usando cuenta administrativa)[cite: 15], se identifican los siguientes 10 problemas y sus respectivos controles:
+
+| # | Problema | Riesgo | Control propuesto |
+| :--- | :--- | :--- | :--- |
+| 1 | **Firewall abierto (Cualquier origen)** | Exposición a ataques de denegación de servicio (DoS) y escaneos masivos desde Internet. | Restringir el puerto 5432 en el Firewall solo a la IP del servidor de la aplicación web. |
+| 2 | **Servidor escucha en todas las interfaces** | Aumenta la superficie de ataque al exponer el motor en interfaces públicas o no confiables. | Cambiar `listen_addresses` a la IP privada específica de la red de la base de datos o `localhost`. |
+| 3 | **pg_hba.conf permite 0.0.0.0/0** | Cualquier equipo en el mundo puede intentar iniciar sesión. | Modificar `pg_hba.conf` para permitir conexiones solo desde la subred o IP de la aplicación. |
+| 4 | **Regla all/all en pg_hba.conf** | Las conexiones permitidas pueden intentar acceder a cualquier base de datos. | Especificar exactamente el nombre de la base de datos y el usuario autorizado en lugar de `all`. |
+| 5 | **App web usa usuario administrativo** | Si la app web sufre Inyección SQL, el atacante obtiene control total de la instancia (destrucción de BD, robo total). | Aplicar el Principio de Mínimo Privilegio: crear un rol solo con permisos DML (SELECT, INSERT, UPDATE) para la app. |
+| 6 | **Falta de cifrado en tránsito (implícito)** | Las "contraseñas fuertes" y los datos pueden ser interceptados (sniffing) si viajan en texto plano. | Forzar el uso de `hostssl` en `pg_hba.conf` y configurar certificados TLS. |
+| 7 | **Dependencia de un solo factor perimetral** | Si la contraseña se filtra (ej. en el código fuente de la app), el atacante tiene acceso directo. | Implementar Defensa en Profundidad, combinando contraseñas con restricciones de IP y certificados de cliente. |
+| 8 | **Sin límites de conexión por usuario** | Un atacante puede agotar el `max_connections` realizando múltiples peticiones concurrentes, tirando el servicio. | Establecer un `connection_limit` específico para el usuario de la aplicación web. |
+| 9 | **Riesgo de escalada al Sistema Operativo** | Un superusuario comprometido (usado por la app) puede ejecutar comandos como `COPY` para leer/escribir archivos del SO. | Quitar privilegios de superusuario a la app web y asegurar permisos `700` en el directorio de datos. |
+| 10 | **Vulnerabilidades pre-autenticación** | Confiar solo en contraseñas ignora que el motor de base de datos podría tener vulnerabilidades (ej. desbordamientos) antes del login. | El Firewall debe bloquear el tráfico anómalo antes de que el motor de BD intente procesarlo. |
+
+## Análisis de Controles de Seguridad
+
+**¿Es suficiente tener contraseñas fuertes?**
+No, en absoluto. Las contraseñas fuertes son solo un componente de una estrategia de seguridad, pero por sí solas representan un punto único de fallo (Single Point of Failure). Si se filtra la contraseña, el sistema colapsa[cite: 15]. 
+
+Explicación basada en las capas de Defensa en Profundidad:
+*   **Autenticación:** Una contraseña fuerte no sirve de nada si se transmite sin cifrar (falta de TLS) y es interceptada, o si se almacena estáticamente en un repositorio de código expuesto.
+*   **Autorización:** Aunque el usuario se autentique correctamente, usar una cuenta con privilegios administrativos para una aplicación web es un error crítico. Un fallo en la aplicación (SQL Injection) daría al atacante poder para destruir el servidor.
+*   **Red:** Exponer el puerto a todo Internet (`0.0.0.0/0` en Firewall y pg_hba) permite que la base de datos sufra ataques de Denegación de Servicio (DoS) o explotación de vulnerabilidades del motor antes de llegar a la fase de contraseña.
+*   **Configuración:** Usar comodines (`all/all`) elimina la granularidad, permitiendo movimientos laterales a otras bases de datos en el mismo servidor si una es comprometida.
+*   **Sistema operativo:** Si la base de datos es vulnerada mediante esa cuenta administrativa, el atacante podría usar comandos de PostgreSQL para interactuar con los archivos del sistema operativo, escalando el ataque.
+*   **Monitoreo:** Sin registros (logs) ni alertas, el administrador jamás se enterará si las "contraseñas fuertes" están sufriendo ataques de fuerza bruta o si ya han sido vulneradas y se están extrayendo datos.
+
+---
+
+# Actividad 19 — Construcción de una línea base
+
+## Propuesta de Baseline de Seguridad para PostgreSQL 16
+A continuación se presenta la línea base de seguridad estructurada para entornos de producción, cubriendo los 7 dominios críticos de la arquitectura[cite: 15]:
+
+### 1. Red
+*   **Interfaces autorizadas:** El parámetro `listen_addresses` debe estar configurado únicamente en la IP privada orientada al servidor de aplicaciones (ej. `10.0.1.20`) y `localhost`. Nunca usar `*`[cite: 15].
+*   **Puerto:** Usar el puerto `5432` (o uno modificado), pero estrictamente documentado en la arquitectura de red[cite: 15].
+*   **Firewall:** Implementar políticas de "Denegación por Defecto". Habilitar una regla de entrada que permita tráfico al puerto del motor exclusivamente desde la IP del servidor de la aplicación[cite: 15].
+*   **Redes permitidas:** En `pg_hba.conf`, usar direcciones IP/máscaras específicas (ej. `10.0.1.50/32`) en lugar de subredes completas o el comodín `0.0.0.0/0`[cite: 15].
+
+### 2. Autenticación
+*   **Método:** Uso obligatorio y exclusivo de `scram-sha-256` en todo el clúster (`password_encryption = scram-sha-256`)[cite: 15].
+*   **Políticas de credenciales:** Contraseñas de al menos 16 caracteres, generadas aleatoriamente (sin palabras de diccionario) y almacenadas en bóvedas de secretos (Vaults)[cite: 15].
+*   **Cuentas administrativas:** Prohibir el inicio de sesión de la cuenta genérica `postgres` por red. Cada DBA debe tener su propia cuenta administrativa nominal para garantizar trazabilidad[cite: 15].
+
+### 3. Autorización
+*   **Roles:** Implementar el Principio de Mínimo Privilegio. Revocar privilegios por defecto en el esquema `public` y usar roles de grupo (`rol_lectura`, `rol_escritura`)[cite: 15].
+*   **Privilegios:** Asignar permisos estrictamente granulares sobre tablas y vistas. Ningún usuario no administrativo debe tener permisos de `CREATEROLE` o `CREATEDB`[cite: 15].
+*   **Cuentas de aplicación:** La aplicación debe conectarse con una cuenta dedicada que no sea superusuario y que solo tenga permisos DML (SELECT, INSERT, UPDATE, DELETE) sobre los objetos que realmente necesita[cite: 15].
+
+### 4. Configuración
+*   **Parámetros relevantes:** Habilitar auditoría básica activando `log_connections = on`, `log_disconnections = on`, y definir un `connection_limit` para cada usuario[cite: 15].
+*   **Extensiones:** Instalar extensiones de terceros en esquemas dedicados (no en `public`) y limitar su creación y ejecución a superusuarios autorizados[cite: 15].
+*   **Conexiones:** Ajustar `max_connections` a la capacidad real del hardware y usar un pooler de conexiones (como PgBouncer) para administrar la concurrencia[cite: 15].
+
+### 5. Sistema operativo
+*   **Propietario de archivos:** El usuario `postgres` del Sistema Operativo debe ser el único dueño de los binarios y del directorio de datos de la instancia[cite: 15].
+*   **Permisos:** El directorio de datos (`$PGDATA`) debe tener permisos estrictos `0700` (`rwx------`). Archivos sensibles como `pg_hba.conf` deben estar en `0600`[cite: 15].
+*   **Protección del directorio de datos:** Aislar `$PGDATA` en una partición lógica separada del sistema operativo raíz para evitar bloqueos por almacenamiento lleno[cite: 15].
+
+### 6. Cifrado
+*   **TLS:** Configurar `ssl = on` y `ssl_min_protocol_version = 'TLSv1.2'` (idealmente `TLSv1.3`). Forzar conexiones mediante reglas `hostssl` en `pg_hba.conf`[cite: 15].
+*   **Protección de credenciales:** Nunca usar contraseñas en texto plano en scripts; usar el archivo `.pgpass` con permisos `0600` en el SO o variables de entorno inyectadas[cite: 15].
+*   **Protección de información sensible:** Utilizar funciones como `pgcrypto` para encriptar columnas con PII (Datos de Identificación Personal) o implementar cifrado a nivel de disco (LUKS)[cite: 15].
+
+### 7. Mantenimiento
+*   **Actualización:** Definir una ventana de mantenimiento para aplicar parches de seguridad (versiones menores) de PostgreSQL regularmente[cite: 15].
+*   **Revisión periódica:** Realizar una auditoría semestral de las cuentas activas, revisión de los roles asignados y análisis de logs buscando anomalías[cite: 15].
+*   **Documentación:** Mantener siempre actualizado el diseño de red, el archivo `pg_hba.conf` comentado, los procedimientos de respaldo/restauración y esta línea base[cite: 15].

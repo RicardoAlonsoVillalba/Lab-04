@@ -132,3 +132,106 @@ De acuerdo con el principio de que "una regla de acceso debe ser tan específica
 `host    ventas_db    app_ventas_user    192.168.1.50/32    scram-sha-256`
 
 *(Nota: Asegúrate de adaptar `ventas_db`, `app_ventas_user` y la IP `192.168.1.50/32` a los valores reales que estés utilizando en tu entorno de laboratorio local, tal como indica la práctica)*[cite: 10].
+
+---
+
+# Actividad 7 — Revisar autenticación
+
+## Respuestas sobre Autenticación y Autorización
+A partir de la revisión de `password_encryption` (que debería preferir `scram-sha-256` frente a `md5`)[cite: 10], se responde a lo siguiente:
+
+1. **¿Qué diferencia existe entre autenticación y autorización?**
+   La **autenticación** verifica *quién* es el usuario (identidad), comprobando credenciales como usuario y contraseña[cite: 10]. La **autorización** determina *qué* tiene permitido hacer ese usuario una vez que ha ingresado (permisos, roles, acceso a tablas específicas)[cite: 10].
+   
+2. **¿Qué protege scram-sha-256?**
+   Protege las contraseñas tanto en tránsito (evitando que se envíen en texto plano por la red o que sean interceptadas y reutilizadas en ataques de "pass-the-hash") como en reposo, almacenándolas mediante un algoritmo de hash criptográfico robusto y salteado (salt) que resiste ataques de diccionario y fuerza bruta mucho mejor que MD5[cite: 10].
+
+3. **¿Por qué una contraseña almacenada mediante un mecanismo de autenticación no debe confundirse con cifrado reversible?**
+   Porque las contraseñas se almacenan como un **hash (unidireccional)**, lo que significa que a partir del hash no se puede aplicar un proceso matemático para recuperar la contraseña original en texto plano[cite: 10]. El cifrado reversible, por el contrario, permite descifrar el contenido si se tiene la llave adecuada[cite: 10]. 
+
+4. **¿Qué sucede si una cuenta tiene permisos excesivos aunque utilice una contraseña fuerte?**
+   Si la cuenta llega a ser comprometida (por phishing, robo de sesión o uso malicioso por parte de un empleado), el atacante heredará todos esos permisos excesivos[cite: 10]. Una contraseña fuerte solo protege el perímetro de entrada (autenticación), pero no mitiga el daño si el atacante logra entrar; esto viola el principio de mínimo privilegio y expone todo el sistema[cite: 10].
+
+---
+
+# Actividad 8 — Revisar usuarios y privilegios
+
+## Identificación de roles y privilegios
+Al ejecutar la consulta en la vista `pg_roles`, se identificaron los siguientes usuarios y sus respectivos niveles de acceso en el sistema[cite: 11]:
+
+| Rol | LOGIN | SUPERUSER | CREATEROLE | CREATEDB | Función |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **postgres** | Sí (`t`) | Sí (`t`) | Sí (`t`) | Sí (`t`) | Administrador principal del motor de base de datos. Cuenta por defecto. |
+| **app_user** *(ejemplo)* | Sí (`t`) | No (`f`) | No (`f`) | No (`f`) | Rol utilizado por la aplicación para conectarse y operar sobre sus datos. |
+| **backup_rol** *(ejemplo)* | Sí (`t`) | No (`f`) | No (`f`) | No (`f`) | Cuenta que podría ser innecesaria si no se programan respaldos automatizados o si retiene permisos excesivos. |
+
+## Análisis de Seguridad
+
+**Pregunta:** ¿Por qué no debería utilizarse una cuenta SUPERUSER como cuenta normal de una aplicación?[cite: 11]
+
+**Respuesta:** 
+Utilizar un `SUPERUSER` para una aplicación viola el principio de mínimo privilegio. Un superusuario elude todas las comprobaciones de permisos en PostgreSQL. Si la aplicación sufre una vulnerabilidad (como una Inyección SQL) o sus credenciales son robadas, el atacante obtendría control total y absoluto sobre todo el clúster. Podría leer, modificar o eliminar cualquier base de datos de otros inquilinos, alterar la configuración del motor e incluso, bajo ciertas condiciones, ejecutar comandos en el sistema operativo del servidor. Una aplicación solo debe tener permisos sobre los objetos (tablas, secuencias, vistas) que estrictamente necesita para funcionar.
+
+---
+
+# Actividad 9 — Separar cuentas administrativas y de aplicación
+
+## Diseño de cuentas (Matriz de roles)
+Para aplicar una correcta segregación de funciones y proteger la base de datos, se diseña la siguiente estructura conceptual de cuentas[cite: 12]:
+
+| Cuenta | Propósito | LOGIN | Privilegios |
+| :--- | :--- | :---: | :--- |
+| **DBA** | Administración | Sí | Administrativos (gestión del motor, roles, esquemas y configuraciones globales)[cite: 12]. |
+| **APP** | Aplicación | Sí | Mínimos (operaciones DML estrictamente necesarias para el software, ej: `INSERT`, `UPDATE`, `SELECT`)[cite: 12]. |
+| **CONSULTA** | Consulta | Sí | Solo lectura (exclusivamente `SELECT`, ideal para reportes, análisis de datos o auditorías)[cite: 12]. |
+
+## Análisis de Riesgo
+
+**Pregunta:** ¿Qué riesgo existe si la aplicación se conecta utilizando una cuenta administrativa?[cite: 12]
+
+**Respuesta:** 
+Si la aplicación se conecta con privilegios administrativos (ej. superusuario o DBA), cualquier vulnerabilidad en el código del software (como una Inyección SQL) o el robo de las credenciales de conexión le otorgará a un atacante **control total sobre todo el servidor de base de datos**. 
+
+El atacante no solo podría acceder a los datos de la aplicación comprometida, sino que podría eliminar bases de datos completas (`DROP DATABASE`), leer o modificar información de otras aplicaciones alojadas en el mismo clúster, crear usuarios maliciosos (backdoors) e incluso intentar ejecutar comandos a nivel del sistema operativo. Esto representa una violación crítica al principio de mínimo privilegio.
+
+---
+
+# Actividad 10 — Revisar extensiones
+
+## Análisis de extensiones instaladas
+Tras ejecutar la consulta `SELECT extname, extversion FROM pg_extension ORDER BY extname;`[cite: 12], se evaluó el estado de las extensiones en la base de datos:
+
+1. **¿Qué extensiones existen?**
+   En una instalación estándar de PostgreSQL siempre existirá `plpgsql`[cite: 12]. En entornos de prueba o si se han utilizado herramientas gráficas, es común encontrar otras como `adminpack`, `dblink` o `pgcrypto`[cite: 12].
+2. **¿Cuáles son necesarias?**
+   `plpgsql` es estrictamente necesaria si el sistema, las aplicaciones o los triggers dependen de funciones y procedimientos almacenados escritos en el lenguaje procedural nativo de PostgreSQL[cite: 12].
+3. **¿Cuáles fueron instaladas para prácticas?**
+   Extensiones como `adminpack` (usada comúnmente por pgAdmin para recolectar métricas del servidor) o `dblink` suelen instalarse específicamente para ejercicios de laboratorio y pruebas de administración[cite: 12].
+4. **¿Cuáles podrían representar funcionalidad innecesaria en otro entorno?**
+   En un entorno de producción, `adminpack` o módulos de conexión cruzada como `dblink` o `postgres_fdw` representan un riesgo si la aplicación principal no los requiere[cite: 12]. 
+
+**Principio de Hardening:**
+No significa que una extensión sea insegura simplemente por estar instalada[cite: 12]. Sin embargo, el principio rector de hardening establece que se debe **habilitar únicamente la funcionalidad necesaria para el propósito del sistema**[cite: 12]. Cualquier extensión ajena a las necesidades de la aplicación incrementa la superficie de ataque y debe ser desinstalada.
+
+---
+
+# Actividad 11 — Revisar configuración relacionada con conexiones
+
+## Parámetros de Conexión y Tiempos de Espera
+Al ejecutar las consultas de configuración[cite: 11], se obtuvieron los siguientes valores (Nota: los valores reales pueden variar según tu entorno, aquí se muestran los valores por defecto de PostgreSQL):
+
+| Parámetro | Valor (Ejemplo) | Función |
+| :--- | :--- | :--- |
+| **max_connections** | `100` | Define el número máximo de conexiones concurrentes permitidas al servidor de base de datos[cite: 11]. |
+| **superuser_reserved_connections** | `3` | Reserva un número específico de conexiones exclusivas para superusuarios[cite: 11]. Garantiza que un administrador siempre pueda entrar a diagnosticar o solucionar problemas, incluso si se alcanzó el límite de `max_connections`. |
+| **statement_timeout** | `0` (desactivado) | Establece el tiempo máximo que cualquier consulta (`statement`) tiene permitido ejecutarse antes de ser cancelada automáticamente por el servidor[cite: 11]. Ayuda a prevenir que consultas mal optimizadas consuman recursos indefinidamente. |
+| **idle_in_transaction_session_timeout** | `0` (desactivado) | Define el tiempo máximo que una sesión puede permanecer inactiva (idle) mientras mantiene una transacción abierta[cite: 11]. |
+
+## Análisis de Disponibilidad y Recursos
+
+**Pregunta:** ¿Por qué mantener conexiones indefinidamente abiertas puede representar un problema de disponibilidad o consumo de recursos?[cite: 11]
+
+**Respuesta:** 
+En PostgreSQL, cada conexión establece un proceso independiente en el sistema operativo, lo que consume una cantidad significativa de memoria (RAM) y recursos de CPU. Si las conexiones se mantienen abiertas indefinidamente, se generan dos problemas críticos:
+1. **Problema de Disponibilidad:** Se agota rápidamente el límite configurado en `max_connections`. Una vez alcanzado este límite, la base de datos rechazará cualquier nueva conexión entrante de la aplicación, provocando una denegación de servicio (DoS) efectiva.
+2. **Consumo de Recursos y Bloqueos:** Si una conexión se queda inactiva pero dentro de una transacción (`idle in transaction`), mantiene retenidos candados (locks) sobre las tablas. Esto bloquea a otras consultas que intenten modificar esos datos e impide que el proceso de limpieza interno de PostgreSQL (`autovacuum`) libere el espacio de los registros muertos, lo que degrada severamente el rendimiento y aumenta el tamaño de la base de datos en disco.

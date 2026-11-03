@@ -20,3 +20,26 @@ SELECT
     client_port, 
     application_name 
 FROM pg_stat_activity;
+
+-- =======================================================
+-- Actividad 2: Archivos de configuración
+-- =======================================================
+
+-- 1. Rutas de configuración y autenticación
+SHOW config_file;
+SHOW hba_file;
+SHOW ident_file;
+
+-- 2. Directorios de datos y logs
+SHOW data_directory;
+SHOW log_directory;
+
+-- 3. Parámetros de auditoría de conexiones
+SHOW log_connections;
+SHOW log_disconnections;
+
+-- =======================================================
+-- Actividad 3: Revisión de listen_addresses
+-- =======================================================
+
+SHOW listen_addresses;

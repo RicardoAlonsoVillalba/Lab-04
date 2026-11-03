@@ -32,3 +32,31 @@ Porque no se puede proteger lo que no se conoce. Conocer la superficie de ataque
 **¿Por qué conocer la superficie de ataque debe preceder al hardening?**[cite: 13]
 
 Porque no se puede proteger lo que no se conoce. Conocer la superficie de ataque permite establecer una línea base de seguridad identificando todos los puntos expuestos (puertos, interfaces, servicios, permisos y usuarios)[cite: 11]. Esto asegura que las medidas de *hardening* se apliquen sobre riesgos reales identificados y evita deshabilitar configuraciones o servicios legítimos que la organización realmente necesita para su operación[cite: 11].
+
+---
+
+# Actividad 2 — Identificar los archivos de configuración
+
+## Clasificación de parámetros
+Al ejecutar las consultas, distinguimos cuatro categorías principales de almacenamiento en el motor[cite: 9]:
+* **Configuración:** `config_file` (generalmente `postgresql.conf`).
+* **Autenticación:** `hba_file` (`pg_hba.conf`) y `ident_file` (`pg_ident.conf`).
+* **Datos:** `data_directory` (donde residen las bases de datos físicas).
+* **Logs:** `log_directory`, `log_connections`, y `log_disconnections` (para auditoría y monitoreo).
+
+## Pregunta Analítica
+**¿Por qué es importante conocer la ubicación física de estos archivos?**[cite: 9]
+
+Es fundamental porque la seguridad de PostgreSQL no depende únicamente de los permisos internos de la base de datos (roles y grants), sino también de la seguridad del sistema operativo. Si un atacante o usuario no autorizado logra acceso de lectura/escritura a archivos críticos como `pg_hba.conf` o `postgresql.conf` a nivel del sistema de archivos, podría modificar las reglas de autenticación, habilitar el acceso sin contraseña (trust) o exponer toda la base de datos, evadiendo completamente los controles internos del motor. Conocer su ubicación permite auditar y restringir los permisos de lectura y escritura (ej. mediante `chmod` y `chown`) para que solo el usuario de sistema `postgres` pueda acceder a ellos.
+
+---
+
+# Actividad 3 — Revisar listen_addresses
+
+## Documentación de la configuración
+* **Configuración encontrada:** `*` (Escucha en todas las interfaces).
+* **Interfaces necesarias:** `localhost` y la IP de la red privada interna.
+* **Interfaces innecesarias:** Interfaces públicas o comodines como `0.0.0.0`.
+
+## Análisis de Arquitectura
+La segunda arquitectura (Internet -> X -> Firewall -> Red privada -> Servidor PostgreSQL) reduce mejor la exposición[cite: 8]. Al ubicar el motor de base de datos dentro de una red privada protegida por un firewall que bloquea el tráfico de Internet, el puerto 5432 queda completamente aislado del exterior[cite: 8]. Esto garantiza que solo los servicios internos (como una aplicación en la misma red) puedan comunicarse con la base de datos, eliminando la posibilidad de ataques directos o escaneos desde redes públicas[cite: 8].
